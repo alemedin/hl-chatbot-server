@@ -14,65 +14,45 @@ const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
 
-// 🚀 Health check route
+// Root endpoint for status check
 app.get('/', (req, res) => {
   res.send('🚀 Chatbot backend is live and running.');
 });
 
-// 🔁 Utility function to get best available chat model
-let cachedModel = null;
-async function getBestChatModel() {
-  if (cachedModel) return cachedModel;
-
-  const preferredOrder = [
-    'gpt-5',
-    'gpt-4.5',
-    'gpt-4o',
-    'gpt-4-turbo',
-    'gpt-4',
-    'gpt-3.5-turbo',
-  ];
-
-  try {
-    const models = await openai.models.list();
-    const available = models.data.map(m => m.id);
-    for (const preferred of preferredOrder) {
-      const match = available.find(m => m.startsWith(preferred));
-      if (match) {
-        cachedModel = match;
-        console.log(`✅ Using best available model: ${cachedModel}`);
-        return cachedModel;
-      }
-    }
-  } catch (error) {
-    console.error('⚠️ Failed to fetch model list:', error);
-  }
-
-  // Fallback
-  cachedModel = 'gpt-4o';
-  console.log(`⚠️ Falling back to: ${cachedModel}`);
-  return cachedModel;
-}
-
-// 💬 Main chat endpoint
+// POST /chat
 app.post('/chat', async (req, res) => {
   try {
     const { messages } = req.body;
-    const model = await getBestChatModel();
+
+    // Dynamically fetch available models and use the most capable one
+    const models = await openai.models.list();
+    const sortedModels = models.data
+      .filter((m) => m.id.startsWith('gpt-') && m.id.includes('turbo') || m.id.includes('gpt-4o'))
+      .sort((a, b) => {
+        const extractVersion = (id) => {
+          if (id.includes('gpt-4o')) return 100; // force 4o to top
+          const match = id.match(/gpt-(\d+(\.\d+)?)/);
+          return match ? parseFloat(match[1]) : 0;
+        };
+        return extractVersion(b.id) - extractVersion(a.id);
+      });
+
+    const selectedModel = sortedModels[0]?.id || 'gpt-4o';
+    console.log(`💡 Using model: ${selectedModel}`);
 
     const chatCompletion = await openai.chat.completions.create({
-      model,
-      messages,
+      model: selectedModel,
+      messages: messages,
     });
 
     const reply = chatCompletion.choices[0].message.content;
     res.json({ reply });
   } catch (error) {
-    console.error('❌ Error handling chat:', error);
+    console.error('❌ Error:', error.message || error);
     res.status(500).json({ error: 'Something went wrong.' });
   }
 });
 
 app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
+  console.log(`✅ Server listening on port ${port}`);
 });
