@@ -1,47 +1,49 @@
 import express from 'express';
-import cors from 'cors';
-import dotenv from 'dotenv';
 import bodyParser from 'body-parser';
-import { OpenAI } from 'openai';
+import fetch from 'node-fetch';
+import dotenv from 'dotenv';
 
 dotenv.config();
-
 const app = express();
-const port = process.env.PORT || 10000;
-
-app.use(cors());
 app.use(bodyParser.json());
 
-// Optional: homepage route
-app.get('/', (req, res) => {
-  res.send('Chatbot server is live and ready.');
-});
-
-// Initialize OpenAI with sk-proj key
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY
-});
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
 app.post('/chat', async (req, res) => {
-  const { messages } = req.body;
+  const messages = req.body.messages;
 
   if (!Array.isArray(messages)) {
     return res.status(400).json({ error: 'Invalid messages format' });
   }
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4o',
-      messages
+    const response = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        model: 'gpt-4o', // or 'gpt-4-turbo', etc.
+        messages: messages,
+      }),
     });
 
-    res.json({ reply: completion.choices[0].message.content });
+    const data = await response.json();
+
+    if (!response.ok) {
+      return res.status(response.status).json(data);
+    }
+
+    res.json({ reply: data.choices[0].message.content });
+
   } catch (error) {
-    console.error('Error:', error);
-    res.status(500).json({ error: error.response?.data?.error?.message || 'Unknown error' });
+    console.error('Error calling OpenAI API:', error);
+    res.status(500).json({ error: 'Something went wrong calling OpenAI API' });
   }
 });
 
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`Server listening on port ${PORT}`);
 });
