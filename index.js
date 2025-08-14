@@ -9,6 +9,11 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Optional homepage route
+app.get('/', (req, res) => {
+  res.send('✅ Chatbot server is live and ready.');
+});
+
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 });
