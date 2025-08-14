@@ -1,7 +1,10 @@
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const { Configuration, OpenAIApi } = require('openai');
+import express from 'express';
+import cors from 'cors';
+import dotenv from 'dotenv';
+import bodyParser from 'body-parser';
+import { OpenAI } from 'openai';
+
+dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 10000;
@@ -9,33 +12,36 @@ const port = process.env.PORT || 10000;
 app.use(cors());
 app.use(bodyParser.json());
 
-// Load OpenAI API key from environment variable
-const configuration = new Configuration({
-  apiKey: process.env.OPENAI_API_KEY,
+// Optional: homepage route
+app.get('/', (req, res) => {
+  res.send('Chatbot server is live and ready.');
 });
 
-const openai = new OpenAIApi(configuration);
+// Initialize OpenAI with sk-proj key
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY
+});
 
 app.post('/chat', async (req, res) => {
+  const { messages } = req.body;
+
+  if (!Array.isArray(messages)) {
+    return res.status(400).json({ error: 'Invalid messages format' });
+  }
+
   try {
-    const { messages } = req.body;
-
-    if (!messages || !Array.isArray(messages)) {
-      return res.status(400).json({ error: 'Invalid messages format' });
-    }
-
-    const completion = await openai.createChatCompletion({
-      model: 'gpt-4o', // Change this if you want to use a different model
-      messages,
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o',
+      messages
     });
 
-    res.json({ response: completion.data.choices[0].message.content });
+    res.json({ reply: completion.choices[0].message.content });
   } catch (error) {
-    console.error('Error forwarding message to OpenAI:', error.response?.data || error.message || error);
-    res.status(500).json({ error: error.response?.data || error.message || 'Unknown error' });
+    console.error('Error:', error);
+    res.status(500).json({ error: error.response?.data?.error?.message || 'Unknown error' });
   }
 });
 
 app.listen(port, () => {
-  console.log(`✅ Server listening on port ${port}`);
+  console.log(`Server listening on port ${port}`);
 });
