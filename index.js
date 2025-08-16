@@ -101,16 +101,17 @@ function sanitizeAndLinkify(reply) {
     return `[${label}](${url})`;
   });
 
-  // 2) If model still wrote raw Shopify links, validate their tags; drop/repair if needed
-  reply = reply.replace(
-    /$begin:math:display$([^$end:math:display$]+)\]$begin:math:text$(https:\\/\\/shop\\.healthandlight\\.com\\/collections\\/(services|nutritional-supplements)\\?filter\\.p\\.tag=([^)\\s]+))$end:math:text$/gi,
-    (m, text, _url, coll, tagRaw) => {
-      const tag = normalizeTag(tagRaw);
-      if (!tag) return text; // keep text, remove bad link
-      const url = coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
-      return `[${text}](${url})`;
-    }
-  );
+// 2) If model still wrote raw Shopify links, validate their tags; drop/repair if needed
+const shopifyLinkRegex = new RegExp(
+  String.raw`$begin:math:display$([^$end:math:display$]+)\]$begin:math:text$(https:\\/\\/shop\\.healthandlight\\.com\\/collections\\/(services|nutritional-supplements)\\?filter\\.p\\.tag=([^) \\t]+))$end:math:text$`,
+  'gi'
+);
+reply = reply.replace(shopifyLinkRegex, (_m, text, _url, coll, tagRaw) => {
+  const tag = normalizeTag(tagRaw);
+  if (!tag) return text; // keep visible text, strip bad link
+  const url = coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
+  return `[${text}](${url})`;
+});
 
   return reply;
 }
