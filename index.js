@@ -30,8 +30,6 @@ const allowedTagsSet      = new Set(allowedTags);
 const allowedTagsLowerMap = new Map(allowedTags.map(t => [t.toLowerCase(), t]));
 
 // ====== Direct service links for specials (Watsu) ======
-// You provided the Watsu URL; we use it by default.
-// You can override with env LINK_WATSU if needed.
 const WATSU_URL = process.env.LINK_WATSU
   || 'https://shop.healthandlight.com/products/aquatic-bodywork-watsu-waterdance';
 
@@ -59,8 +57,12 @@ const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function normalizeTag(nameRaw) {
   if (!nameRaw) return null;
-  const candidate = decodeURIComponent(String(nameRaw)).trim().toLowerCase();
-  return allowedTagsLowerMap.get(candidate) || null;
+  // trim spaces + common punctuation/quotes/brackets that the model might include
+  const cleaned = decodeURIComponent(String(nameRaw))
+    .replace(/^[\s"'‘’“”\[\(\{]+|[\s"'‘’“”\]\)\}\.,;:!?]+$/g, '')
+    .trim()
+    .toLowerCase();
+  return allowedTagsLowerMap.get(cleaned) || null;
 }
 
 function extractTagsFrom(text) {
@@ -109,11 +111,13 @@ function sanitizeAndLinkify(reply) {
 
   // 2) If the model wrote a raw Shopify collection link, validate the tag
   reply = reply.replace(
-    /(https:\/\/shop\.healthandlight\.com\/collections\/(services|nutritional-supplements)\?filter\.p\.tag=)([^\s)\]]+)/gi,
-    (_m, base, coll, tagRaw) => {
+    /(https:\/\/shop\.healthandlight\.com\/collections\/(services|nutritional-supplements|all)\?filter\.p\.tag=)([^\s)\]]+)/gi,
+    (_m, _base, coll, tagRaw) => {
       const tag = normalizeTag(tagRaw);
-      if (!tag) return base + encodeURIComponent(''); // neuter bad tag
-      return coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
+      if (!tag) return ''; // drop bad link entirely
+      if (coll.toLowerCase() === 'services') return makeServicesLink(tag);
+      if (coll.toLowerCase() === 'all')       return makeAllLink(tag);
+      return makeSuppsLink(tag);
     }
   );
 
@@ -222,6 +226,12 @@ app.post('/chat', async (req, res) => {
     // Footer: primary + related (validated) without noisy tags
     let footerTags = [...primaryTags, ...expandRelatedTags(primaryTags, 6)];
     if (!footerTags.length) footerTags = extractTagsFrom(reply);
+
+    // If Watsu is discussed and Bodywork is a real tag, surface it too
+    if (mentionsWatsu) {
+      const bodywork = allowedTagsLowerMap.get('bodywork');
+      if (bodywork) footerTags.unshift(bodywork);
+    }
 
     footerTags = [...new Set(footerTags)]
       .filter(t => allowedTagsSet.has(t) && !TAG_DENYLIST.has(t))
