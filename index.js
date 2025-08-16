@@ -228,7 +228,7 @@ app.post('/chat', async (req, res) => {
     if (footerTags.length) {
       const links = footerTags
         .sort((a, b) => a.localeCompare(b))
-        .map(t => `- [${t}](${makeSuppsLink(t)})`) // footer links to supplements collection by default
+        .map(t => `- [${t}](${makeAllLink(t)})`) // footer links to all collections by default
         .join('\n');
       reply += `\n\n**Shop by category:**\n${links}`;
     }
