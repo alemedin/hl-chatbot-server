@@ -29,6 +29,23 @@ try {
 const allowedTagsSet      = new Set(allowedTags);
 const allowedTagsLowerMap = new Map(allowedTags.map(t => [t.toLowerCase(), t]));
 
+// ====== Direct service links for specials (Watsu) ======
+// You provided the Watsu URL; we use it by default.
+// You can override with env LINK_WATSU if needed.
+const WATSU_URL = process.env.LINK_WATSU
+  || 'https://shop.healthandlight.com/products/aquatic-bodywork-watsu-waterdance';
+
+// ====== Related tag graph (for footer suggestions) ======
+const KEYWORD_TAG_GRAPH = {
+  'Anxiety': ['Stress','Sleep','Mood','Magnesium','Brain','Adapt & Thrive'],
+  'Sleep': ['Anxiety','Stress','Magnesium','Mood'],
+  'Stress': ['Anxiety','Sleep','Adapt & Thrive','Magnesium','Mood'],
+  'Digestion': ['Gut Health','Probiotics','Enzymes','Leaky Gut'],
+  'Brain': ['Memory & Focus','Mood','Omega-3s'],
+  'Immune Support': ['Antioxidants'],
+  'Detox': ['Heavy Metal Detox','Liver','Kidneys']
+};
+
 // ====== Tag link builders ======
 const makeServicesLink = (t) =>
   `https://shop.healthandlight.com/collections/services?filter.p.tag=${encodeURIComponent(t)}`;
@@ -48,6 +65,7 @@ function extractTagsFrom(text) {
   if (!text || !allowedTags.length) return [];
   const hits = new Set();
   for (const raw of allowedTags) {
+    // flexible matching: "&" ~ "and", "-" ~ optional space
     let pat = escapeRegex(raw);
     pat = pat.replace(/\\&/g, '(?:&|and)');
     pat = pat.replace(/\\-/g, '[- ]?');
@@ -63,20 +81,10 @@ const TAG_DENYLIST = new Set([
   'Notebooks/Journals','Recorded Meditations','Personal Care'
 ]);
 
-const RELATED_TAGS = {
-  'Anxiety': ['Stress','Sleep','Mood','Magnesium','Brain','Adapt & Thrive'],
-  'Sleep': ['Anxiety','Stress','Magnesium','Mood'],
-  'Stress': ['Anxiety','Sleep','Adapt & Thrive','Magnesium','Mood'],
-  'Digestion': ['Gut Health','Probiotics','Enzymes','Leaky Gut'],
-  'Brain': ['Memory & Focus','Mood','Omega-3s'],
-  'Immune Support': ['Antioxidants'],
-  'Detox': ['Heavy Metal Detox','Liver','Kidneys']
-};
-
 function expandRelatedTags(tags, limit = 6) {
   const out = [];
   for (const t of tags) {
-    const rel = RELATED_TAGS[t] || [];
+    const rel = KEYWORD_TAG_GRAPH[t] || [];
     for (const r of rel) {
       if (allowedTagsSet.has(r) && !TAG_DENYLIST.has(r)) out.push(r);
     }
@@ -84,34 +92,28 @@ function expandRelatedTags(tags, limit = 6) {
   return [...new Set(out)].slice(0, limit);
 }
 
-// Sanitize any raw links the model may emit and convert placeholders to real links
+// Convert placeholders to Shopify links, and repair any raw links if present
 function sanitizeAndLinkify(reply) {
   if (!reply) return reply;
 
-  // 1) Convert placeholders: [SERVICES_TAG: Anxiety] / [SUPPLEMENTS_TAG: Sleep]
-  reply = reply.replace(/$begin:math:display$(SERVICES_TAG|SUPPLEMENTS_TAG):\\s*([^$end:math:display$]+?)\]/gi, (_, type, tagName) => {
+  // 1) Convert placeholders like: [SERVICES_TAG: Anxiety] / [SUPPLEMENTS_TAG: Sleep]
+  reply = reply.replace(/\[(SERVICES_TAG|SUPPLEMENTS_TAG):\s*([^\]]+)\]/gi, (_m, type, tagName) => {
     const tag = normalizeTag(tagName);
     if (!tag) return ''; // drop invalid tag
-    const label = type.toUpperCase() === 'SERVICES_TAG'
-      ? `${tag} Services`
-      : `${tag} Nutritional Supplements`;
-    const url = type.toUpperCase() === 'SERVICES_TAG'
-      ? makeServicesLink(tag)
-      : makeSuppsLink(tag);
+    const url = type.toUpperCase() === 'SERVICES_TAG' ? makeServicesLink(tag) : makeSuppsLink(tag);
+    const label = type.toUpperCase() === 'SERVICES_TAG' ? `${tag} Services` : `${tag} Nutritional Supplements`;
     return `[${label}](${url})`;
   });
 
-// 2) If model still wrote raw Shopify links, validate their tags; drop/repair if needed
-const shopifyLinkRegex = new RegExp(
-  String.raw`$begin:math:display$([^$end:math:display$]+)\]$begin:math:text$(https:\\/\\/shop\\.healthandlight\\.com\\/collections\\/(services|nutritional-supplements)\\?filter\\.p\\.tag=([^) \\t]+))$end:math:text$`,
-  'gi'
-);
-reply = reply.replace(shopifyLinkRegex, (_m, text, _url, coll, tagRaw) => {
-  const tag = normalizeTag(tagRaw);
-  if (!tag) return text; // keep visible text, strip bad link
-  const url = coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
-  return `[${text}](${url})`;
-});
+  // 2) If the model wrote a raw Shopify collection link, validate the tag
+  reply = reply.replace(
+    /(https:\/\/shop\.healthandlight\.com\/collections\/(services|nutritional-supplements)\?filter\.p\.tag=)([^\s)\]]+)/gi,
+    (_m, base, coll, tagRaw) => {
+      const tag = normalizeTag(tagRaw);
+      if (!tag) return base + encodeURIComponent(''); // neuter bad tag
+      return coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
+    }
+  );
 
   return reply;
 }
@@ -138,7 +140,7 @@ let selectedModel = 'gpt-4o';
   }
 })();
 
-// ====== System prompt with placeholders ======
+// ====== System prompt with placeholders + Watsu exception ======
 function buildSystemPrompt() {
   return `
 You are a warm, empathetic and professional AI wellness advisor for Health & Light Institute.
@@ -146,7 +148,7 @@ You are a warm, empathetic and professional AI wellness advisor for Health & Lig
 CORE RULES
 - NEVER invent service or product names.
 - Prefer what actually exists at https://shop.healthandlight.com.
-- Do NOT write raw Shopify links yourself.
+- Do NOT write raw Shopify links yourself (except the single Watsu link below).
 - When you want to point to a category, output ONE placeholder instead:
   • Services placeholder: [SERVICES_TAG: <TAG>]
   • Supplements placeholder: [SUPPLEMENTS_TAG: <TAG>]
@@ -155,11 +157,15 @@ CORE RULES
 FOLLOW-UPS
 - If you already expressed empathy once in the session, do not repeat it unless the user introduces a new concern (e.g., adds "sleep issues" after "anxiety").
 
+SPECIAL CASES
+- If the user asks about “Watsu”, “aquatic bodywork”, “water shiatsu”, or “waterdance”: treat it as AVAILABLE and include this direct link: https://shop.healthandlight.com/products/aquatic-bodywork-watsu-waterdance
+  You may ALSO include a broader category via a placeholder like [SERVICES_TAG: Bodywork] if appropriate.
+
 STYLE / FORMAT
 Use these sections where relevant:
-**Services:** – one sentence + ONE placeholder ([SERVICES_TAG: Anxiety] for example).
-**Nutritional Supplements:** – one sentence + ONE placeholder ([SUPPLEMENTS_TAG: Anxiety]).
-**Lifestyle & Dietary Recommendations:** – concise, grounded holistic health & wellness tips (dietary guidance including things to avoid).
+**Services:** – one sentence + ONE placeholder (e.g., [SERVICES_TAG: Anxiety]).
+**Nutritional Supplements:** – one sentence + ONE placeholder (e.g., [SUPPLEMENTS_TAG: Anxiety]).
+**Lifestyle & Dietary Recommendations:** – concise, grounded holistic health & wellness tips (include dietary guidance).
 
 ACCURACY
 - If there is no direct offering for the user’s request, say so plainly and recommend the nearest relevant internal tag via a placeholder.
@@ -197,6 +203,18 @@ app.post('/chat', async (req, res) => {
     });
 
     let reply = chatCompletion.choices?.[0]?.message?.content || '';
+
+    // Never imply Watsu is unavailable; if Watsu is in scope, ensure link appears
+    const mentionsWatsu = /watsu|aquatic bodywork|water\s*shiatsu|waterdance/i.test(userText + '\n' + reply);
+    if (mentionsWatsu) {
+      // remove any "we don't offer watsu" phrasing if produced
+      reply = reply.replace(/(?:we|i)\s+do(?:\s*not|n't)?\s+offer\s+watsu[^.?!]*[.?!]?/gi, '');
+      if (!/\bhttps?:\/\/\S+aquatic-bodywork-watsu-waterdance/i.test(reply)) {
+        reply += `\n\n**Featured Service:**\n- [Watsu (Aquatic Bodywork)](${WATSU_URL})`;
+      }
+    }
+
+    // Convert placeholders and repair raw links
     reply = sanitizeAndLinkify(reply);
 
     // Footer: primary + related (validated) without noisy tags
@@ -204,7 +222,7 @@ app.post('/chat', async (req, res) => {
     if (!footerTags.length) footerTags = extractTagsFrom(reply);
 
     footerTags = [...new Set(footerTags)]
-      .filter(t => !TAG_DENYLIST.has(t))
+      .filter(t => allowedTagsSet.has(t) && !TAG_DENYLIST.has(t))
       .slice(0, 8);
 
     if (footerTags.length) {
