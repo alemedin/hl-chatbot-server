@@ -13,14 +13,11 @@ app.use(cors({ origin: '*' }));
 app.use(bodyParser.json());
 
 // ====== OpenAI client ======
-const openai = new OpenAI({
-  apiKey: process.env.OPENAI_API_KEY,
-});
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // ====== Load allowed store tags ======
 let allowedTags = [];
 try {
-  // This must exist in your repo root (as you uploaded): tags_unique.json
   allowedTags = require('./tags_unique.json'); // JSON array of strings
   if (!Array.isArray(allowedTags)) allowedTags = [];
 } catch (e) {
@@ -30,7 +27,7 @@ try {
 
 // ====== Tag link builder (choose /all or /nutritional-supplements) ======
 const TAG_BASE_COLLECTION = process.env.TAG_BASE_COLLECTION || 'all';
-// If you prefer supplements-only, set TAG_BASE_COLLECTION="nutritional-supplements" in Render env.
+// If you want supplements-only links, set TAG_BASE_COLLECTION="nutritional-supplements" in Render env.
 const TAG_BASE_URL = `https://shop.healthandlight.com/collections/${TAG_BASE_COLLECTION}?filter.p.tag=`;
 const makeTagLink = (t) => TAG_BASE_URL + encodeURIComponent(t);
 
@@ -41,14 +38,8 @@ function extractTagsFrom(text) {
   if (!text || !allowedTags.length) return [];
   const hits = new Set();
   for (const raw of allowedTags) {
-    // Flexible matching:
-    // - "&" or "and"
-    // - "-" or space
-    let pat = escapeRegex(raw);
-    pat = pat.replace(/\\&/g, '(?:&|and)');
-    pat = pat.replace(/\\-/g, '[- ]?');
-
-    // Looser boundaries so punctuation doesn’t break matches
+    // allow "&" or "and", and optional hyphen/space variants
+    let pat = escapeRegex(raw).replace(/\\&/g, '(?:&|and)').replace(/\\-/g, '[- ]?');
     const re = new RegExp(`(?:^|[^\\w])${pat}(?=[^\\w]|$)`, 'i');
     if (re.test(text)) hits.add(raw);
   }
@@ -56,19 +47,15 @@ function extractTagsFrom(text) {
 }
 
 // ====== Dynamic model selection ======
-let selectedModel = 'gpt-4o'; // Fallback default
+let selectedModel = 'gpt-4o'; // fallback default
 (async () => {
   try {
     const models = await openai.models.list();
     const sorted = models.data
       .filter((m) => m.id.startsWith('gpt-') && (m.id.includes('turbo') || m.id.includes('gpt-4o')))
       .sort((a, b) => {
-        const v = (id) => {
-          if (id.includes('gpt-4o')) return 100; // prioritize 4o family
-          const m = id.match(/gpt-(\d+(\.\d+)?)/);
-          return m ? parseFloat(m[1]) : 0;
-        };
-        return v(b.id) - v(a.id);
+        const score = (id) => (id.includes('gpt-4o') ? 100 : (id.match(/gpt-(\d+(\.\d+)?)/)?.[1] ?? 0));
+        return score(b.id) - score(a.id);
       });
     if (sorted.length) {
       selectedModel = sorted[0].id;
@@ -81,7 +68,7 @@ let selectedModel = 'gpt-4o'; // Fallback default
   }
 })();
 
-// ====== Build the system prompt (inject your tag list so model uses them verbatim) ======
+// ====== System prompt ======
 const SYSTEM_PROMPT = {
   role: 'system',
   content: `You are a warm, professional AI wellness advisor for Health & Light Institute.
@@ -89,11 +76,11 @@ const SYSTEM_PROMPT = {
 CORE RULES
 - NEVER invent service or product names.
 - Prefer what actually exists at https://shop.healthandlight.com.
-- When talking about Services or Supplements, DO NOT list category names.
+- When talking about Services or Products, DO NOT list category names verbatim in bullets.
 - Instead, give one short sentence plus a SINGLE link to the relevant FILTERED collection:
   • Services: https://shop.healthandlight.com/collections/services?filter.p.tag=<TAG>
-  • Supplements: https://shop.healthandlight.com/collections/nutritional-supplements?filter.p.tag=<TAG>
-  Replace <TAG> with the user’s topic (e.g., Anxiety, Sleep, Digestion). If no suitable tag exists, say so and give the nearest related tag that does exist.
+  • Prodcuts: https://shop.healthandlight.com/collections/nutritional-supplements?filter.p.tag=<TAG>
+  Replace <TAG> with the user’s topic (e.g., Anxiety, Sleep, Digestion). If no suitable tag exists, say so and offer the nearest related tag that does exist.
 
 FOLLOW-UPS
 - For follow-up questions in the same chat, do not repeat empathy already expressed. Move straight to the next helpful step unless the user introduces new emotional content.
@@ -106,7 +93,7 @@ STYLE / FORMAT
 
 SAFETY / ACCURACY
 - If there is no direct offering for a request, say so plainly and suggest the nearest relevant internal category link (filtered by tag).
-- Include links only to our domain. No external claims, no affiliate suggestions unless user explicitly asks.
+- Include links only to our domain. No external claims, no affiliate suggestions unless the user explicitly asks.
 `
 };
 
@@ -114,8 +101,8 @@ SAFETY / ACCURACY
 app.get('/', (_req, res) => {
   res.send(
     `🚀 Chatbot backend is live.<br>` +
-      `🤖 Model: <strong>${selectedModel}</strong><br>` +
-      `🏷️ Tags loaded: <strong>${allowedTags.length}</strong> (base: /collections/${TAG_BASE_COLLECTION})`
+    `🤖 Model: <strong>${selectedModel}</strong><br>` +
+    `🏷️ Tags loaded: <strong>${allowedTags.length}</strong> (base: /collections/${TAG_BASE_COLLECTION})`
   );
 });
 
@@ -129,10 +116,10 @@ app.post('/chat', async (req, res) => {
   try {
     const { messages } = req.body;
 
-    // Use the global SYSTEM_PROMPT you defined above. Do NOT redefine it here.
+    // Use the global SYSTEM_PROMPT. Do not call any undefined helper.
     const fullMessages = [
       SYSTEM_PROMPT,
-      ...(Array.isArray(messages) ? messages.filter(m => m.role !== 'system') : [])
+      ...(Array.isArray(messages) ? messages.filter((m) => m.role !== 'system') : [])
     ];
 
     const chatCompletion = await openai.chat.completions.create({
@@ -142,14 +129,14 @@ app.post('/chat', async (req, res) => {
 
     let reply = chatCompletion.choices?.[0]?.message?.content || '';
 
-    // === Post-process: add Shop-by-category links when tags are mentioned ===
+    // === Post-process: append "Shop by category" links for any tags the model mentioned ===
     const MAX_TAG_LINKS = 8;
     const tagsFound = extractTagsFrom(reply).slice(0, MAX_TAG_LINKS);
 
     if (tagsFound.length) {
       const links = tagsFound
         .sort((a, b) => a.localeCompare(b))
-        .map(t => `- [${t}](${makeTagLink(t)})`)
+        .map((t) => `- [${t}](${makeTagLink(t)})`)
         .join('\n');
 
       reply += `\n\n**Shop by category:**\n${links}`;
@@ -160,4 +147,9 @@ app.post('/chat', async (req, res) => {
     console.error('❌ Chat error:', error?.message || error);
     res.status(500).json({ error: 'Something went wrong.' });
   }
+});
+
+// ====== Start server ======
+app.listen(port, () => {
+  console.log(`✅ Server listening on port ${port}`);
 });
