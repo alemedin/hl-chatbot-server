@@ -128,10 +128,12 @@ app.get('/debug/tags', (_req, res) => {
 app.post('/chat', async (req, res) => {
   try {
     const { messages } = req.body;
-    const SYSTEM_PROMPT = { role: 'system', content: buildSystemPrompt() };
 
-    // Ensure system prompt is first, and don't allow other system prompts to sneak in
-    const fullMessages = [SYSTEM_PROMPT, ...(Array.isArray(messages) ? messages.filter((m) => m.role !== 'system') : [])];
+    // Use the global SYSTEM_PROMPT you defined above. Do NOT redefine it here.
+    const fullMessages = [
+      SYSTEM_PROMPT,
+      ...(Array.isArray(messages) ? messages.filter(m => m.role !== 'system') : [])
+    ];
 
     const chatCompletion = await openai.chat.completions.create({
       model: selectedModel,
@@ -141,13 +143,13 @@ app.post('/chat', async (req, res) => {
     let reply = chatCompletion.choices?.[0]?.message?.content || '';
 
     // === Post-process: add Shop-by-category links when tags are mentioned ===
-    const MAX_TAG_LINKS = 8; // keep it tidy
+    const MAX_TAG_LINKS = 8;
     const tagsFound = extractTagsFrom(reply).slice(0, MAX_TAG_LINKS);
 
     if (tagsFound.length) {
       const links = tagsFound
         .sort((a, b) => a.localeCompare(b))
-        .map((t) => `- [${t}](${makeTagLink(t)})`)
+        .map(t => `- [${t}](${makeTagLink(t)})`)
         .join('\n');
 
       reply += `\n\n**Shop by category:**\n${links}`;
@@ -158,9 +160,4 @@ app.post('/chat', async (req, res) => {
     console.error('❌ Chat error:', error?.message || error);
     res.status(500).json({ error: 'Something went wrong.' });
   }
-});
-
-// ====== Start server ======
-app.listen(port, () => {
-  console.log(`✅ Server listening on port ${port}`);
 });
