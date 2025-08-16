@@ -51,6 +51,8 @@ const makeServicesLink = (t) =>
   `https://shop.healthandlight.com/collections/services?filter.p.tag=${encodeURIComponent(t)}`;
 const makeSuppsLink = (t) =>
   `https://shop.healthandlight.com/collections/nutritional-supplements?filter.p.tag=${encodeURIComponent(t)}`;
+const makeAllLink = (t) =>
+  `https://shop.healthandlight.com/collections/all?filter.p.tag=${encodeURIComponent(t)}`;
 
 // ====== Helpers ======
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
