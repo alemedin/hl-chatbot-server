@@ -30,8 +30,9 @@ const allowedTagsSet      = new Set(allowedTags);
 const allowedTagsLowerMap = new Map(allowedTags.map(t => [t.toLowerCase(), t]));
 
 // ====== Direct service links for specials (Watsu) ======
-const WATSU_URL = process.env.LINK_WATSU
-  || 'https://shop.healthandlight.com/products/aquatic-bodywork-watsu-waterdance';
+const WATSU_URL =
+  process.env.LINK_WATSU ||
+  'https://shop.healthandlight.com/products/aquatic-bodywork-watsu-waterdance';
 
 // ====== Related tag graph (for footer suggestions) ======
 const KEYWORD_TAG_GRAPH = {
@@ -57,12 +58,8 @@ const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function normalizeTag(nameRaw) {
   if (!nameRaw) return null;
-  // trim spaces + common punctuation/quotes/brackets that the model might include
-  const cleaned = decodeURIComponent(String(nameRaw))
-    .replace(/^[\s"'‘’“”\[\(\{]+|[\s"'‘’“”\]\)\}\.,;:!?]+$/g, '')
-    .trim()
-    .toLowerCase();
-  return allowedTagsLowerMap.get(cleaned) || null;
+  const candidate = decodeURIComponent(String(nameRaw)).trim().toLowerCase();
+  return allowedTagsLowerMap.get(candidate) || null;
 }
 
 function extractTagsFrom(text) {
@@ -96,7 +93,21 @@ function expandRelatedTags(tags, limit = 6) {
   return [...new Set(out)].slice(0, limit);
 }
 
-// Convert placeholders to Shopify links, and repair any raw links if present
+/** Rewrites any placeholders the model produced so they use the preferredTag for THIS turn. */
+function retagPlaceholders(reply, preferredTag) {
+  if (!reply || !preferredTag) return reply;
+  const tag = normalizeTag(preferredTag);
+  if (!tag) return reply;
+
+  // Force the current-turn tag into placeholders.
+  reply = reply
+    .replace(/\[SERVICES_TAG:\s*[^\]]+\]/gi, `[SERVICES_TAG: ${tag}]`)
+    .replace(/\[SUPPLEMENTS_TAG:\s*[^\]]+\]/gi, `[SUPPLEMENTS_TAG: ${tag}]`);
+
+  return reply;
+}
+
+/** Convert placeholders to Shopify links, and repair any raw links if present. */
 function sanitizeAndLinkify(reply) {
   if (!reply) return reply;
 
@@ -111,13 +122,11 @@ function sanitizeAndLinkify(reply) {
 
   // 2) If the model wrote a raw Shopify collection link, validate the tag
   reply = reply.replace(
-    /(https:\/\/shop\.healthandlight\.com\/collections\/(services|nutritional-supplements|all)\?filter\.p\.tag=)([^\s)\]]+)/gi,
-    (_m, _base, coll, tagRaw) => {
+    /(https:\/\/shop\.healthandlight\.com\/collections\/(services|nutritional-supplements)\?filter\.p\.tag=)([^\s)\]]+)/gi,
+    (_m, base, coll, tagRaw) => {
       const tag = normalizeTag(tagRaw);
-      if (!tag) return ''; // drop bad link entirely
-      if (coll.toLowerCase() === 'services') return makeServicesLink(tag);
-      if (coll.toLowerCase() === 'all')       return makeAllLink(tag);
-      return makeSuppsLink(tag);
+      if (!tag) return base + encodeURIComponent(''); // neuter bad tag
+      return coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
     }
   );
 
@@ -193,14 +202,23 @@ app.post('/chat', async (req, res) => {
   try {
     const inbound = Array.isArray(req.body?.messages) ? req.body.messages : [];
 
-    // Infer primary tags from the user's messages (not the model's)
-    const userText = inbound.filter(m => m.role === 'user').map(m => m.content).join('\n\n');
-    const primaryTags = extractTagsFrom(userText).slice(0, 4);
+    // Latest user message (for this turn’s intent)
+    const lastUserMsg = [...inbound].reverse().find(m => m.role === 'user')?.content || '';
+    const turnTags = extractTagsFrom(lastUserMsg);             // tags in *latest* user message
+    const preferredTag = turnTags[0] || null;                  // use the first one if present
+
+    // Historical user tags (for footer expansion)
+    const userTextAll = inbound.filter(m => m.role === 'user').map(m => m.content).join('\n\n');
+    const historicalTags = extractTagsFrom(userTextAll).slice(0, 4);
 
     const fullMessages = [
       { role: 'system', content: buildSystemPrompt() },
+      // For this reply only, force placeholders (if any) to use the latest tag the user just mentioned.
+      preferredTag
+        ? { role: 'system', content: `For THIS reply, if you include Services or Nutritional Supplements sections, the placeholder tag MUST be: ${preferredTag}. Do not use an earlier tag for those placeholders.` }
+        : null,
       ...inbound.filter(m => m.role !== 'system')
-    ];
+    ].filter(Boolean);
 
     const chatCompletion = await openai.chat.completions.create({
       model: selectedModel,
@@ -211,27 +229,23 @@ app.post('/chat', async (req, res) => {
     let reply = chatCompletion.choices?.[0]?.message?.content || '';
 
     // Never imply Watsu is unavailable; if Watsu is in scope, ensure link appears
-    const mentionsWatsu = /watsu|aquatic bodywork|water\s*shiatsu|waterdance/i.test(userText + '\n' + reply);
+    const mentionsWatsu = /watsu|aquatic bodywork|water\s*shiatsu|waterdance/i.test(lastUserMsg + '\n' + reply);
     if (mentionsWatsu) {
-      // remove any "we don't offer watsu" phrasing if produced
       reply = reply.replace(/(?:we|i)\s+do(?:\s*not|n't)?\s+offer\s+watsu[^.?!]*[.?!]?/gi, '');
       if (!/\bhttps?:\/\/\S+aquatic-bodywork-watsu-waterdance/i.test(reply)) {
         reply += `\n\n**Featured Service:**\n- [Watsu (Aquatic Bodywork)](${WATSU_URL})`;
       }
     }
 
+    // Force placeholders to the current-turn tag (so "Sleep" wins when the user just asked about sleep)
+    reply = retagPlaceholders(reply, preferredTag);
+
     // Convert placeholders and repair raw links
     reply = sanitizeAndLinkify(reply);
 
-    // Footer: primary + related (validated) without noisy tags
-    let footerTags = [...primaryTags, ...expandRelatedTags(primaryTags, 6)];
+    // Footer: prefer the latest tag + related; then fall back to any tags found in reply
+    let footerTags = preferredTag ? [preferredTag, ...expandRelatedTags([preferredTag], 6)] : [...historicalTags];
     if (!footerTags.length) footerTags = extractTagsFrom(reply);
-
-    // If Watsu is discussed and Bodywork is a real tag, surface it too
-    if (mentionsWatsu) {
-      const bodywork = allowedTagsLowerMap.get('bodywork');
-      if (bodywork) footerTags.unshift(bodywork);
-    }
 
     footerTags = [...new Set(footerTags)]
       .filter(t => allowedTagsSet.has(t) && !TAG_DENYLIST.has(t))
@@ -240,7 +254,7 @@ app.post('/chat', async (req, res) => {
     if (footerTags.length) {
       const links = footerTags
         .sort((a, b) => a.localeCompare(b))
-        .map(t => `- [${t}](${makeAllLink(t)})`) // footer links to all collections by default
+        .map(t => `- [${t}](${makeAllLink(t)})`) // footer links to ALL (products + services)
         .join('\n');
       reply += `\n\n**Shop by category:**\n${links}`;
     }
