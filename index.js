@@ -27,13 +27,24 @@ try {
 const allowedTagsSet      = new Set(allowedTags);
 const allowedTagsLowerMap = new Map(allowedTags.map(t => [t.toLowerCase(), t]));
 
-// ====== Service-only blocklist (tags you don’t use for Services) ======
-const SERVICE_TAG_BLOCKLIST = new Set([
-  'Cancer', 'Breast Cancer', 'Oncology', 'Chemotherapy', 'Radiation'
+// ====== Canonical tag aliases (synonyms → your real tag names) ======
+const TAG_ALIASES = new Map([
+  // Cancer family: always map to your canonical tag
+  ['cancer', 'Cancer Support'],
+  ['breast cancer', 'Cancer Support'],
+  ['oncology', 'Cancer Support'],
+  ['chemotherapy', 'Cancer Support'],
+  ['radiation', 'Cancer Support'],
 ]);
 
-// Choose which tag to pivot to when a services tag is blocked (e.g., Cancer)
-function serviceFallbackFor(tag) {
+// ====== Service-only blocklist (tags you don’t use for Services) ======
+// Use ONLY canonical tags here (after normalization, see normalizeTag).
+const SERVICE_TAG_BLOCKLIST = new Set([
+  'Cancer Support'
+]);
+
+// Choose which tag to pivot to when a services tag is blocked (e.g., Cancer Support)
+function serviceFallbackFor(_tag) {
   const prefs = ['Stress', 'Sleep', 'Anxiety', 'Bodywork', 'Adapt & Thrive'];
   for (const p of prefs) {
     if (allowedTagsSet.has(p)) return p;
@@ -54,7 +65,9 @@ const KEYWORD_TAG_GRAPH = {
   'Digestion': ['Gut Health','Probiotics','Enzymes','Leaky Gut'],
   'Brain': ['Memory & Focus','Mood','Omega-3s'],
   'Immune Support': ['Antioxidants'],
-  'Detox': ['Heavy Metal Detox','Liver','Kidneys']
+  'Detox': ['Heavy Metal Detox','Liver','Kidneys'],
+  // NEW: when user says “cancer”, surface supportive categories
+  'Cancer Support': ['Immune Support','Antioxidants','Stress','Sleep','Detox','Liver']
 };
 
 // ====== Link builders ======
@@ -81,10 +94,22 @@ const makeArticlesLink = (t) =>
 // ====== Helpers ======
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
+// Normalize any incoming tag-like text to one of your allowed tags.
+// 1) exact match, 2) alias map, 3) special contains("cancer") → Cancer Support
 function normalizeTag(nameRaw) {
   if (!nameRaw) return null;
   const candidate = decodeURIComponent(String(nameRaw)).trim().toLowerCase();
-  return allowedTagsLowerMap.get(candidate) || null;
+
+  // exact allowed tag
+  const exact = allowedTagsLowerMap.get(candidate);
+  if (exact) return exact;
+
+  // alias map
+  const alias = TAG_ALIASES.get(candidate) ||
+                (candidate.includes('cancer') ? 'Cancer Support' : null);
+
+  if (alias && allowedTagsSet.has(alias)) return alias;
+  return null;
 }
 
 function extractTagsFrom(text) {
@@ -118,15 +143,15 @@ function expandRelatedTags(tags, limit = 6) {
   return [...new Set(out)].slice(0, limit);
 }
 
-// ====== Current-turn synonym → tag mapping ======
+// ====== Current-turn synonym → tag mapping (use canonical names) ======
 const KEYWORD_TO_TAG = [
   { re: /\b(insomnia|trouble sleeping|sleep (issues|problems)|can'?t sleep|sleeping)\b/i, tag: 'Sleep' },
   { re: /\b(anxiety|anxious|panic( attack)?s?)\b/i, tag: 'Anxiety' },
   { re: /\b(stress|stressed|overwhelm(ed)?)\b/i, tag: 'Stress' },
   { re: /\b(brain fog|focus|concentration|memory)\b/i, tag: 'Brain' },
   { re: /\b(mood|low mood|irritable|irritability)\b/i, tag: 'Mood' },
-  // cancer-family → we’ll prefer Cancer for supplements/articles, but pivot services later
-  { re: /\b(breast\s*cancer|cancer|oncolog(y|ist)|chemotherapy|radiation)\b/i, tag: 'Cancer' }
+  // cancer-family → map straight to your canonical tag
+  { re: /\b(breast\s*cancer|cancer|oncolog(y|ist)|chemotherapy|radiation)\b/i, tag: 'Cancer Support' }
 ];
 
 function inferTagFromFreeText(txt) {
@@ -280,6 +305,7 @@ CORE RULES
 - When you want to point to a category, output ONE placeholder instead:
   • Services placeholder: [SERVICES_TAG: <TAG>]
   • Supplements placeholder: [SUPPLEMENTS_TAG: <TAG>]
+  • Articles placeholder: [ARTICLES_TAG: <TAG>]
   The backend will convert placeholders to links only if <TAG> is a real store tag.
 
 LINK DISCIPLINE (IMPORTANT)
@@ -298,7 +324,7 @@ STYLE / FORMAT
 Use these sections where relevant:
 **Services:** – one sentence + ONE placeholder (e.g., [SERVICES_TAG: Anxiety]).
 **Nutritional Supplements:** – one sentence + ONE placeholder (e.g., [SUPPLEMENTS_TAG: Anxiety]).
-**Articles:** – one sentence + ONE blog link placeholder (e.g., "Articles about Anxiety") via: https://shop.healthandlight.com/blogs/news/tagged/<TAG>
+**Articles:** – one sentence + ONE blog link placeholder (e.g., [ARTICLES_TAG: Anxiety]).
 **Lifestyle & Dietary Recommendations:** – concise, grounded holistic tips (include dietary guidance).
 
 ACCURACY
@@ -323,10 +349,12 @@ app.post('/chat', async (req, res) => {
 
     // Latest user message (for this turn’s intent)
     const lastUserMsg = [...inbound].reverse().find(m => m.role === 'user')?.content || '';
-    const cancerIntent = isCancerIntent(lastUserMsg);
+    const cancerIntent = isCancerIntent(lastUserMsg); // (kept if you want to branch later)
 
     // Preferred tag for THIS turn (what user just asked about)
-    let preferredTag = extractTagsFrom(lastUserMsg)[0] || inferTagFromFreeText(lastUserMsg);
+    let preferredTag =
+      extractTagsFrom(lastUserMsg)[0] ||
+      inferTagFromFreeText(lastUserMsg);
 
     // Build full messages (force the model to use placeholders)
     const fullMessages = [
@@ -364,7 +392,6 @@ app.post('/chat', async (req, res) => {
     reply = ensureSectionsHaveOneLink(reply, preferredTag);
 
     // Footer: suggest primary + related tags (ALL collection)
-    // Use this-turn tag if available; otherwise infer from entire user history; otherwise from reply text.
     const userTextAll = inbound.filter(m => m.role === 'user').map(m => m.content).join('\n\n');
     let footerTags = preferredTag
       ? [preferredTag, ...expandRelatedTags([preferredTag], 6)]
