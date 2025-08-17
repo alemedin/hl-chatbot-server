@@ -93,18 +93,32 @@ function expandRelatedTags(tags, limit = 6) {
   return [...new Set(out)].slice(0, limit);
 }
 
-/** Rewrites any placeholders the model produced so they use the preferredTag for THIS turn. */
+/* --- NEW: synonym → tag mapping for the current-turn intent --- */
+const KEYWORD_TO_TAG = [
+  { re: /\b(insomnia|trouble sleeping|sleep (issues|problems)|can'?t sleep|sleeping)\b/i, tag: 'Sleep' },
+  { re: /\b(anxiety|anxious|panic( attack)?s?)\b/i, tag: 'Anxiety' },
+  { re: /\b(stress|stressed|overwhelm(ed)?)\b/i, tag: 'Stress' },
+  { re: /\b(brain fog|focus|concentration|memory)\b/i, tag: 'Brain' },
+  { re: /\b(mood|low mood|irritable|irritability)\b/i, tag: 'Mood' }
+];
+
+function inferTagFromFreeText(txt) {
+  if (!txt) return null;
+  for (const { re, tag } of KEYWORD_TO_TAG) {
+    if (re.test(txt)) return tag;
+  }
+  return null;
+}
+
+/** Rewrites any placeholders the model produced so they use preferredTag for THIS turn. */
 function retagPlaceholders(reply, preferredTag) {
   if (!reply || !preferredTag) return reply;
   const tag = normalizeTag(preferredTag);
   if (!tag) return reply;
 
-  // Force the current-turn tag into placeholders.
-  reply = reply
+  return reply
     .replace(/\[SERVICES_TAG:\s*[^\]]+\]/gi, `[SERVICES_TAG: ${tag}]`)
     .replace(/\[SUPPLEMENTS_TAG:\s*[^\]]+\]/gi, `[SUPPLEMENTS_TAG: ${tag}]`);
-
-  return reply;
 }
 
 /** Convert placeholders to Shopify links, and repair any raw links if present. */
@@ -129,6 +143,44 @@ function sanitizeAndLinkify(reply) {
       return coll.toLowerCase() === 'services' ? makeServicesLink(tag) : makeSuppsLink(tag);
     }
   );
+
+  return reply;
+}
+
+/* --- NEW: ensure the Services/Supplements sections carry the CURRENT tag --- */
+function ensureSectionLinks(reply, preferredTag) {
+  const tag = normalizeTag(preferredTag);
+  if (!reply || !tag) return reply;
+
+  // Replace any existing Services links to use current tag
+  reply = reply.replace(
+    /\[([^\]]+)\]\(https:\/\/shop\.healthandlight\.com\/collections\/services\?filter\.p\.tag=[^)]+\)/gi,
+    (_m, text) => `[${text}](${makeServicesLink(tag)})`
+  );
+  // If Services section exists but no Services link at all, append one
+  const hasServicesSection = /(^|\n)\s*(\*\*)?\s*Services\s*\2?\s*:?/i.test(reply);
+  const hasServicesLink    = /collections\/services\?filter\.p\.tag=/i.test(reply);
+  if (hasServicesSection && !hasServicesLink) {
+    reply = reply.replace(/(^|\n)\s*(\*\*)?\s*Services\s*\2?\s*:?.*?(\n{2,}|\s*$)/is, (m) => {
+      const ln = `\n- [${tag} Services](${makeServicesLink(tag)})\n`;
+      return m.includes('\n- [') ? m : m.replace(/\n*$/, `\n${ln}`);
+    });
+  }
+
+  // Replace any existing Supplements links to use current tag
+  reply = reply.replace(
+    /\[([^\]]+)\]\(https:\/\/shop\.healthandlight\.com\/collections\/nutritional-supplements\?filter\.p\.tag=[^)]+\)/gi,
+    (_m, text) => `[${text}](${makeSuppsLink(tag)})`
+  );
+  // If Nutritional Supplements section exists but no link, append one
+  const hasSuppsSection = /(^|\n)\s*(\*\*)?\s*Nutritional\s+Supplements\s*\2?\s*:?/i.test(reply);
+  const hasSuppsLink    = /collections\/nutritional-supplements\?filter\.p\.tag=/i.test(reply);
+  if (hasSuppsSection && !hasSuppsLink) {
+    reply = reply.replace(/(^|\n)\s*(\*\*)?\s*Nutritional\s+Supplements\s*\2?\s*:?.*?(\n{2,}|\s*$)/is, (m) => {
+      const ln = `\n- [${tag} Nutritional Supplements](${makeSuppsLink(tag)})\n`;
+      return m.includes('\n- [') ? m : m.replace(/\n*$/, `\n${ln}`);
+    });
+  }
 
   return reply;
 }
@@ -204,8 +256,7 @@ app.post('/chat', async (req, res) => {
 
     // Latest user message (for this turn’s intent)
     const lastUserMsg = [...inbound].reverse().find(m => m.role === 'user')?.content || '';
-    const turnTags = extractTagsFrom(lastUserMsg);             // tags in *latest* user message
-    const preferredTag = turnTags[0] || null;                  // use the first one if present
+    let preferredTag = (extractTagsFrom(lastUserMsg)[0]) || inferTagFromFreeText(lastUserMsg);
 
     // Historical user tags (for footer expansion)
     const userTextAll = inbound.filter(m => m.role === 'user').map(m => m.content).join('\n\n');
@@ -213,7 +264,6 @@ app.post('/chat', async (req, res) => {
 
     const fullMessages = [
       { role: 'system', content: buildSystemPrompt() },
-      // For this reply only, force placeholders (if any) to use the latest tag the user just mentioned.
       preferredTag
         ? { role: 'system', content: `For THIS reply, if you include Services or Nutritional Supplements sections, the placeholder tag MUST be: ${preferredTag}. Do not use an earlier tag for those placeholders.` }
         : null,
@@ -242,6 +292,9 @@ app.post('/chat', async (req, res) => {
 
     // Convert placeholders and repair raw links
     reply = sanitizeAndLinkify(reply);
+
+    // NEW: If the model wrote plain text sections with no/old links, fix or append links with the current tag
+    reply = ensureSectionLinks(reply, preferredTag);
 
     // Footer: prefer the latest tag + related; then fall back to any tags found in reply
     let footerTags = preferredTag ? [preferredTag, ...expandRelatedTags([preferredTag], 6)] : [...historicalTags];
