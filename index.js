@@ -27,24 +27,26 @@ try {
 const allowedTagsSet      = new Set(allowedTags);
 const allowedTagsLowerMap = new Map(allowedTags.map(t => [t.toLowerCase(), t]));
 
-// ====== Canonical tag aliases (synonyms → your real tag names) ======
-const TAG_ALIASES = new Map([
-  // Cancer family: always map to your canonical tag
-  ['cancer', 'Cancer Support'],
-  ['breast cancer', 'Cancer Support'],
-  ['oncology', 'Cancer Support'],
-  ['chemotherapy', 'Cancer Support'],
-  ['radiation', 'Cancer Support'],
-]);
+// ====== Simple in-memory session store (server remembers last N turns) ======
+const sessions = new Map(); // clientId -> { messages: [...], updated: ts }
+const MAX_TURNS = 30;
+function getSessionMessages(clientId) {
+  if (!clientId) return [];
+  const s = sessions.get(clientId);
+  return Array.isArray(s?.messages) ? s.messages : [];
+}
+function setSessionMessages(clientId, msgs) {
+  if (!clientId) return;
+  sessions.set(clientId, { messages: msgs.slice(-MAX_TURNS), updated: Date.now() });
+}
 
 // ====== Service-only blocklist (tags you don’t use for Services) ======
-// Use ONLY canonical tags here (after normalization, see normalizeTag).
 const SERVICE_TAG_BLOCKLIST = new Set([
-  'Cancer Support'
+  'Cancer', 'Cancer Support', 'Breast Cancer', 'Oncology', 'Chemotherapy', 'Radiation'
 ]);
 
-// Choose which tag to pivot to when a services tag is blocked (e.g., Cancer Support)
-function serviceFallbackFor(_tag) {
+// Choose which tag to pivot to when a services tag is blocked
+function serviceFallbackFor(/*tag*/) {
   const prefs = ['Stress', 'Sleep', 'Anxiety', 'Bodywork', 'Adapt & Thrive'];
   for (const p of prefs) {
     if (allowedTagsSet.has(p)) return p;
@@ -65,9 +67,7 @@ const KEYWORD_TAG_GRAPH = {
   'Digestion': ['Gut Health','Probiotics','Enzymes','Leaky Gut'],
   'Brain': ['Memory & Focus','Mood','Omega-3s'],
   'Immune Support': ['Antioxidants'],
-  'Detox': ['Heavy Metal Detox','Liver','Kidneys'],
-  // NEW: when user says “cancer”, surface supportive categories
-  'Cancer Support': ['Immune Support','Antioxidants','Stress','Sleep','Detox','Liver']
+  'Detox': ['Heavy Metal Detox','Liver','Kidneys']
 };
 
 // ====== Link builders ======
@@ -78,7 +78,7 @@ const makeSuppsLink = (t) =>
 const makeAllLink = (t) =>
   `https://shop.healthandlight.com/collections/all?filter.p.tag=${encodeURIComponent(t)}`;
 
-// Blog tag links need a slug: lowercased, spaces->hyphens, "&"->"and", strip non-alphanum
+// Blog tag links need a slug
 function slugifyTagForBlog(tag) {
   return String(tag)
     .toLowerCase()
@@ -94,22 +94,10 @@ const makeArticlesLink = (t) =>
 // ====== Helpers ======
 const escapeRegex = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// Normalize any incoming tag-like text to one of your allowed tags.
-// 1) exact match, 2) alias map, 3) special contains("cancer") → Cancer Support
 function normalizeTag(nameRaw) {
   if (!nameRaw) return null;
   const candidate = decodeURIComponent(String(nameRaw)).trim().toLowerCase();
-
-  // exact allowed tag
-  const exact = allowedTagsLowerMap.get(candidate);
-  if (exact) return exact;
-
-  // alias map
-  const alias = TAG_ALIASES.get(candidate) ||
-                (candidate.includes('cancer') ? 'Cancer Support' : null);
-
-  if (alias && allowedTagsSet.has(alias)) return alias;
-  return null;
+  return allowedTagsLowerMap.get(candidate) || null;
 }
 
 function extractTagsFrom(text) {
@@ -143,15 +131,15 @@ function expandRelatedTags(tags, limit = 6) {
   return [...new Set(out)].slice(0, limit);
 }
 
-// ====== Current-turn synonym → tag mapping (use canonical names) ======
+// ====== Current-turn synonym → tag mapping ======
+const hasCancerSupportTag = allowedTagsSet.has('Cancer Support');
 const KEYWORD_TO_TAG = [
   { re: /\b(insomnia|trouble sleeping|sleep (issues|problems)|can'?t sleep|sleeping)\b/i, tag: 'Sleep' },
   { re: /\b(anxiety|anxious|panic( attack)?s?)\b/i, tag: 'Anxiety' },
   { re: /\b(stress|stressed|overwhelm(ed)?)\b/i, tag: 'Stress' },
   { re: /\b(brain fog|focus|concentration|memory)\b/i, tag: 'Brain' },
   { re: /\b(mood|low mood|irritable|irritability)\b/i, tag: 'Mood' },
-  // cancer-family → map straight to your canonical tag
-  { re: /\b(breast\s*cancer|cancer|oncolog(y|ist)|chemotherapy|radiation)\b/i, tag: 'Cancer Support' }
+  { re: /\b(breast\s*cancer|cancer|oncolog(y|ist)|chemotherapy|radiation)\b/i, tag: hasCancerSupportTag ? 'Cancer Support' : 'Cancer' }
 ];
 
 function inferTagFromFreeText(txt) {
@@ -180,15 +168,15 @@ function convertPlaceholders(reply, preferredTag) {
         tag = fb || null;
       }
       if (!tag) return ''; // still invalid for services — drop
-      return `[${tag} Services](${makeServicesLink(tag)})`;
+      return `[Supportive Services (${tag})](${makeServicesLink(tag)})`;
     }
 
     if (type.toUpperCase() === 'SUPPLEMENTS_TAG') {
-      return `[${tag} Nutritional Supplements](${makeSuppsLink(tag)})`;
+      return `[Explore Supplements (${tag})](${makeSuppsLink(tag)})`;
     }
 
     // ARTICLES_TAG
-    return `[${tag} Articles](${makeArticlesLink(tag)})`;
+    return `[Read Articles (${tag})](${makeArticlesLink(tag)})`;
   });
 }
 
@@ -219,7 +207,6 @@ function sanitizeLinks(reply, preferredTag) {
   reply = reply.replace(
     /(https:\/\/shop\.healthandlight\.com\/blogs\/news\/tagged\/)([^\s)\]]]+)/gi,
     (_m, base, slug) => {
-      // try to map slug back to a tag
       const guess = slug.replace(/-/g, ' ').replace(/and/g, '&');
       let tag = normalizeTag(guess) || normalizeTag(slug) || normalizeTag(preferredTag);
       if (!tag) return base + 'wellness';
@@ -230,44 +217,69 @@ function sanitizeLinks(reply, preferredTag) {
   return reply;
 }
 
-/** Ensure that Services / Supplements / Articles sections each have exactly one correct link. */
+/** Ensure that Services / Supplements / Articles sections each have exactly one correct link,
+ *  with friendly labels and no duplicates.
+ */
 function ensureSectionsHaveOneLink(reply, preferredTag) {
   if (!reply) return reply;
-  let tag = normalizeTag(preferredTag);
+  const norm = (t) => normalizeTag(t) || null;
 
-  // SERVICES section — enforce fallback if needed
-  let serviceTag = tag;
+  // decide tags per section
+  const baseTag = norm(preferredTag);
+
+  // Services tag may be blocked; choose a fallback
+  let serviceTag = baseTag;
   if (!serviceTag || SERVICE_TAG_BLOCKLIST.has(serviceTag)) {
-    serviceTag = serviceFallbackFor(serviceTag || ''); // may become null
+    serviceTag = serviceFallbackFor(serviceTag || '');
   }
 
-  // If there is a Services section, ensure one valid link
-  if (/(^|\n)\s*(\*\*)?\s*Services\s*\2?\s*:?/i.test(reply)) {
-    const link = serviceTag ? `- [${serviceTag} Services](${makeServicesLink(serviceTag)})` : '';
-    // remove any existing services collection links, then add our single one (if available)
-    reply = reply
-      .replace(/\n- \[[^\]]+\]\(https:\/\/shop\.healthandlight\.com\/collections\/services\?[^\)]+\)/gi, '')
-      .replace(/(^|\n)(\*\*)?\s*Services\s*\2?\s*:?[^\n]*\n?/i, (m) => m + (link ? `\n${link}\n` : '\n'));
+  const suppTag    = baseTag;
+  const articleTag = baseTag;
+
+  // remove existing links for each section (inline or bullets)
+  const rmServicesLinks = (s) =>
+    s.replace(/\[[^\]]+\]\(\s*https:\/\/shop\.healthandlight\.com\/collections\/services\?[^)]+\)/gi, '');
+  const rmSuppLinks = (s) =>
+    s.replace(/\[[^\]]+\]\(\s*https:\/\/shop\.healthandlight\.com\/collections\/nutritional-supplements\?[^)]+\)/gi, '');
+  const rmArticleLinks = (s) =>
+    s.replace(/\[[^\]]+\]\(\s*https:\/\/shop\.healthandlight\.com\/blogs\/news\/tagged\/[^)]+\)/gi, '');
+
+  function injectOne(sectionRegex, builder, remover) {
+    reply = remover(reply); // strip all of this type first
+    reply = reply.replace(sectionRegex, (m) => {
+      const line = builder();
+      return line ? `${m}\n${line}\n` : `${m}\n`;
+    });
   }
 
-  // SUPPLEMENTS section — use preferred tag if present
-  if (/(^|\n)\s*(\*\*)?\s*Nutritional\s+Supplements\s*\2?\s*:?/i.test(reply)) {
-    const suppTag = tag;
-    const link = suppTag ? `- [${suppTag} Nutritional Supplements](${makeSuppsLink(suppTag)})` : '';
-    reply = reply
-      .replace(/\n- \[[^\]]+\]\(https:\/\/shop\.healthandlight\.com\/collections\/nutritional-supplements\?[^\)]+\)/gi, '')
-      .replace(/(^|\n)(\*\*)?\s*Nutritional\s+Supplements\s*\2?\s*:?[^\n]*\n?/i, (m) => m + (link ? `\n${link}\n` : '\n'));
-  }
+  const serviceLabel = serviceTag ? `Supportive Services (${serviceTag})` : `Supportive Services`;
+  const suppLabel    = suppTag    ? `Explore Supplements (${suppTag})`    : `Explore Supplements`;
+  const artLabel     = articleTag ? `Read Articles (${articleTag})`       : `Read Articles`;
 
-  // ARTICLES section — use preferred tag if present
-  if (/(^|\n)\s*(\*\*)?\s*Articles\s*\2?\s*:?/i.test(reply)) {
-    const articleTag = tag;
-    const link = articleTag ? `- [${articleTag} Articles](${makeArticlesLink(articleTag)})` : '';
-    reply = reply
-      .replace(/\n- \[[^\]]+\]\(https:\/\/shop\.healthandlight\.com\/blogs\/news\/tagged\/[^\)]+\)/gi, '')
-      .replace(/(^|\n)(\*\*)?\s*Articles\s*\2?\s*:?[^\n]*\n?/i, (m) => m + (link ? `\n${link}\n` : '\n'));
-  }
+  // section headers
+  const rxServices   = /(^|\n)(\*\*)?\s*Services\s*\2?\s*:?[^\n]*\n?/i;
+  const rxSupps      = /(^|\n)(\*\*)?\s*Nutritional\s+Supplements\s*\2?\s*:?[^\n]*\n?/i;
+  const rxArticles   = /(^|\n)(\*\*)?\s*Articles\s*\2?\s*:?[^\n]*\n?/i;
 
+  injectOne(
+    rxServices,
+    () => serviceTag ? `- [${serviceLabel}](${makeServicesLink(serviceTag)})` : '',
+    rmServicesLinks
+  );
+
+  injectOne(
+    rxSupps,
+    () => suppTag ? `- [${suppLabel}](${makeSuppsLink(suppTag)})` : '',
+    rmSuppLinks
+  );
+
+  injectOne(
+    rxArticles,
+    () => articleTag ? `- [${artLabel}](${makeArticlesLink(articleTag)})` : '',
+    rmArticleLinks
+  );
+
+  reply = reply.replace(/\n{3,}/g, '\n\n'); // tidy
   return reply;
 }
 
@@ -310,22 +322,21 @@ CORE RULES
 
 LINK DISCIPLINE (IMPORTANT)
 - For each section (**Services**, **Nutritional Supplements**, **Articles**) include **exactly one** link for that section.
-- Do not repeat the same link as a separate bullet or standalone line in the same section.
-- Keep links under their section only; avoid echoing the same link again.
+- Do not repeat the same link as a separate bullet or inline in the same section.
 
 FOLLOW-UPS
 - If you already expressed empathy once in the session, do not repeat it unless the user introduces a new concern (e.g., adds "sleep issues" after "anxiety").
 
 SPECIAL CASES
-- If the user asks about “Watsu”, “aquatic bodywork”, “water shiatsu”, or “waterdance”: treat it as AVAILABLE and include this direct link: https://shop.healthandlight.com/products/aquatic-bodywork-watsu-waterdance
+- If the user asks about “Watsu”, “aquatic bodywork”, “water shiatsu”, or “waterdance”: treat it as AVAILABLE and include this direct link: ${WATSU_URL}
   You may ALSO include a broader category via a placeholder like [SERVICES_TAG: Bodywork] if appropriate.
 
 STYLE / FORMAT
 Use these sections where relevant:
 **Services:** – one sentence + ONE placeholder (e.g., [SERVICES_TAG: Anxiety]).
 **Nutritional Supplements:** – one sentence + ONE placeholder (e.g., [SUPPLEMENTS_TAG: Anxiety]).
-**Articles:** – one sentence + ONE blog link placeholder (e.g., [ARTICLES_TAG: Anxiety]).
-**Lifestyle & Dietary Recommendations:** – concise, grounded holistic tips (include dietary guidance).
+**Articles:** – one sentence + ONE placeholder (e.g., [ARTICLES_TAG: Anxiety]).
+**Lifestyle & Dietary Recommendations:** – concise, grounded holistic tips.
 
 ACCURACY
 - If there is no direct offering for the user’s request, say so plainly and recommend the nearest relevant internal tag via a placeholder.
@@ -345,22 +356,26 @@ app.get('/', (_req, res) => {
 // ====== Chat endpoint ======
 app.post('/chat', async (req, res) => {
   try {
-    const inbound = Array.isArray(req.body?.messages) ? req.body.messages : [];
+    const clientId = req.body?.clientId || req.headers['x-chat-client'];
+    let inbound    = Array.isArray(req.body?.messages) ? req.body.messages : [];
+
+    // Fallback to server memory if client didn't send history
+    if (!inbound.length && clientId) {
+      inbound = getSessionMessages(clientId);
+    }
 
     // Latest user message (for this turn’s intent)
     const lastUserMsg = [...inbound].reverse().find(m => m.role === 'user')?.content || '';
-    const cancerIntent = isCancerIntent(lastUserMsg); // (kept if you want to branch later)
+    const cancerIntent = isCancerIntent(lastUserMsg);
 
-    // Preferred tag for THIS turn (what user just asked about)
-    let preferredTag =
-      extractTagsFrom(lastUserMsg)[0] ||
-      inferTagFromFreeText(lastUserMsg);
+    // Preferred tag for THIS turn
+    let preferredTag = extractTagsFrom(lastUserMsg)[0] || inferTagFromFreeText(lastUserMsg);
 
     // Build full messages (force the model to use placeholders)
     const fullMessages = [
       { role: 'system', content: buildSystemPrompt() },
       preferredTag
-        ? { role: 'system', content: `For THIS reply, if you include **Services**, **Nutritional Supplements**, or **Articles**, use the placeholder tag: ${preferredTag}.` }
+        ? { role: 'system', content: `For THIS reply, if you include Services, Nutritional Supplements, or Articles, use the placeholder tag: ${preferredTag}.` }
         : null,
       ...inbound.filter(m => m.role !== 'system')
     ].filter(Boolean);
@@ -410,6 +425,10 @@ app.post('/chat', async (req, res) => {
         .join('\n');
       reply += `\n\n**Shop by category:**\n${links}`;
     }
+
+    // ====== Persist server-side session memory (best effort) ======
+    const newHistory = [...inbound.filter(m => m.role !== 'system'), { role: 'assistant', content: reply }];
+    if (clientId) setSessionMessages(clientId, newHistory);
 
     res.json({ reply });
   } catch (error) {
